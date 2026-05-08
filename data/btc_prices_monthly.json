@@ -1,0 +1,27 @@
+{
+  "source": "Google Finance wholepage chart (tsuid_WG_9aY6XCr7s2roPp-ODmAo)",
+  "symbol": "BTC-USD",
+  "interval": "~daily samples over ~1 month",
+  "x_axis_labels": ["4月14日", "5月2日"],
+  "samples": [
+    { "ts_min": 29594878, "price": 71290.38 },
+    { "ts_min": 29596318, "price": 70981.11 },
+    { "ts_min": 29597758, "price": 71878.66 },
+    { "ts_min": 29599198, "price": 72892.87 },
+    { "ts_min": 29600638, "price": 71673.75 },
+    { "ts_min": 29602078, "price": 71006.52 },
+    { "ts_min": 29603518, "price": 74461.09 },
+    { "ts_min": 29604958, "price": 74374.27 },
+    { "ts_min": 29606398, "price": 74032.73 },
+    { "ts_min": 29625118, "price": 76990.81 },
+    { "ts_min": 29626558, "price": 75939.33 },
+    { "ts_min": 29627998, "price": 77091.84 },
+    { "ts_min": 29629438, "price": 78409.63 },
+    { "ts_min": 29630878, "price": 78196.01 },
+    { "ts_min": 29632318, "price": 80305.37 },
+    { "ts_min": 29633758, "price": 80870.03 },
+    { "ts_min": 29635198, "price": 81428.85 },
+    { "ts_min": 29636638, "price": 80009.25 },
+    { "ts_min": 29636943, "price": 79624.78 }
+  ]
+}
