@@ -88,31 +88,63 @@ def allocation_split(pct_in_range: float) -> Tuple[float, float, str]:
     return 0.25, 0.75, "近月高位 (>75%)"
 
 
-LADDER_DROPS = [-1.5, -4.0, -7.0]
-LADDER_WEIGHTS = [1.0, 1.5, 2.5]
-LADDER_LABELS = ["浅档", "中档", "深档"]
+RANGE_LADDER = [
+    {"label": "浅档", "kind": "limit", "drop_pct": -1.5, "weight": 1.0},
+    {"label": "中档", "kind": "limit", "drop_pct": -4.0, "weight": 1.5},
+    {"label": "深档", "kind": "limit", "drop_pct": -7.0, "weight": 2.5},
+]
+
+TREND_LADDER = [
+    {"label": "即时", "kind": "limit", "drop_pct": 0.1, "weight": 4.0},
+    {"label": "浅回", "kind": "limit", "drop_pct": -1.5, "weight": 3.0},
+    {"label": "突破", "kind": "stop", "from_high_pct": 0.5, "weight": 3.0},
+]
 
 
-def ladder_orders(current: float, ladder_budget: float) -> List[dict]:
-    total_w = sum(LADDER_WEIGHTS)
-    orders = []
-    for d, w, label in zip(LADDER_DROPS, LADDER_WEIGHTS, LADDER_LABELS):
-        price = current * (1.0 + d / 100.0)
-        amount = ladder_budget * (w / total_w)
+def ladder_orders(
+    current: float,
+    ladder_budget: float,
+    monthly_high: float,
+    trend: bool = False,
+) -> List[dict]:
+    cfg = TREND_LADDER if trend else RANGE_LADDER
+    total_w = sum(c["weight"] for c in cfg)
+    orders: List[dict] = []
+    for c in cfg:
+        if c["kind"] == "stop":
+            price = monthly_high * (1.0 + c["from_high_pct"] / 100.0)
+            note = f"突破前高 +{c['from_high_pct']}% 触发, 市价跟进"
+        else:
+            price = current * (1.0 + c["drop_pct"] / 100.0)
+            note = ""
+        drop_pct = (price / current - 1.0) * 100.0
+        amount = ladder_budget * (c["weight"] / total_w)
         qty = amount / price
-        orders.append(
-            {
-                "label": label,
-                "trigger_drop_pct": d,
-                "limit_price": round(price, 2),
-                "alloc_usd": round(amount, 2),
-                "alloc_btc": round(qty, 6),
-            }
-        )
+        order = {
+            "label": c["label"],
+            "kind": c["kind"],
+            "trigger_drop_pct": round(drop_pct, 2),
+            "limit_price": round(price, 2),
+            "alloc_usd": round(amount, 2),
+            "alloc_btc": round(qty, 6),
+        }
+        if note:
+            order["note"] = note
+        orders.append(order)
     return orders
 
 
-def timing_hint(s: Stats) -> str:
+def timing_hint(s: Stats, trend: bool = False) -> str:
+    if trend:
+        if s.last_1h_return_pct > 0.3:
+            return ("单边上涨模式 + 最近 1h {:+.2f}% 加速向上: "
+                    "**优先吃即时档**, 同时挂出突破档备单, 浅回档可少量;"
+                    "**避免追到月内高 (-2%) 以内**.").format(s.last_1h_return_pct)
+        if s.last_1h_return_pct < -0.3:
+            return ("单边上涨模式 + 最近 1h {:+.2f}% 短线回落: "
+                    "**优先吃浅回档**, 即时档可暂缓, 突破档保持挂出.").format(s.last_1h_return_pct)
+        return ("单边上涨模式 + 1h 震荡 ({:+.2f}%): "
+                "三档可全部挂出, 让市场来选成交档位.").format(s.last_1h_return_pct)
     if s.last_1h_return_pct < -0.5:
         return ("最近 1h 已回落 {:+.2f}%, 建议**立即**下首张阶梯单 "
                 "(-1% 档已可挂;若已成交则按计划执行下一档).").format(s.last_1h_return_pct)
@@ -132,31 +164,63 @@ def take_profit(monthly_high: float) -> dict:
     }
 
 
-def fill_probability(short: List[float], price: float) -> dict:
-    """统计最近 short 序列中, 有多少比例的样本 <= 给定限价 (即可成交)."""
+def trend_metrics(short: List[float], monthly: List[float]) -> dict:
+    """返回多个时间尺度的涨幅, 用于判断是否真的是单边趋势."""
+    sm = monthly  # daily samples
+    m = {
+        "monthly_30d_pct": (short[-1] / sm[0] - 1.0) * 100.0 if sm else 0.0,
+        "weekly_pct": (
+            (short[-1] / sm[max(0, len(sm) - 8)] - 1.0) * 100.0 if len(sm) >= 8 else 0.0
+        ),
+        "last_3d_pct": (
+            (short[-1] / short[-min(len(short), 144)] - 1.0) * 100.0
+            if len(short) >= 2 else 0.0
+        ),
+        "from_recent_low_pct": (short[-1] / min(short) - 1.0) * 100.0,
+    }
+    return {k: round(v, 2) for k, v in m.items()}
+
+
+def fill_probability(short: List[float], price: float, kind: str) -> dict:
+    """估算挂单的历史成交频率.
+
+    - kind == 'limit': 限价买. 统计 P(p <= price), 价格触达即成交.
+    - kind == 'stop' : 突破买. 统计 P(p >= price), 价格上穿即触发.
+    """
     n = len(short)
-    touched = sum(1 for p in short if p <= price)
-    recent_low = min(short[-48:]) if n >= 48 else min(short)
+    recent_window = short[-48:] if n >= 48 else short
+    if kind == "stop":
+        touched = sum(1 for p in short if p >= price)
+        recently = any(p >= price for p in recent_window)
+    else:
+        touched = sum(1 for p in short if p <= price)
+        recently = any(p <= price for p in recent_window)
     return {
         "touch_rate_pct": round(touched / n * 100.0, 1) if n else 0.0,
-        "recent_low": round(recent_low, 2),
-        "would_have_filled_recent": price >= recent_low,
+        "would_have_filled_recent": recently,
     }
 
 
-def build_plan(budget: float = DEFAULT_BUDGET_USD, core_done: bool = False) -> dict:
+def build_plan(
+    budget: float = DEFAULT_BUDGET_USD,
+    core_done: bool = False,
+    trend: bool = False,
+) -> dict:
     short, monthly = load_series()
     s = compute_stats(short, monthly)
     core_pct, ladder_pct, regime = allocation_split(s.pct_in_range)
 
+    if trend:
+        regime = regime + " · 单边上涨模式"
     if core_done:
         core_pct, ladder_pct = 0.0, 1.0
     core_budget = budget * core_pct
     ladder_budget = budget * ladder_pct
 
-    ladders = ladder_orders(s.current, ladder_budget)
+    ladders = ladder_orders(s.current, ladder_budget, s.period_high, trend=trend)
     for o in ladders:
-        o.update(fill_probability(short, o["limit_price"]))
+        o.update(fill_probability(short, o["limit_price"], o["kind"]))
+    tm = trend_metrics(short, monthly)
 
     plan = {
         "budget_usd": budget,
@@ -170,6 +234,7 @@ def build_plan(budget: float = DEFAULT_BUDGET_USD, core_done: bool = False) -> d
             "position_in_range_pct": round(s.pct_in_range, 1),
             "last_1h_return_pct": round(s.last_1h_return_pct, 2),
             "last_24p_return_pct": round(s.last_24p_return_pct, 2),
+            **tm,
         },
         "core_position": (
             None if core_done else {
@@ -186,7 +251,7 @@ def build_plan(budget: float = DEFAULT_BUDGET_USD, core_done: bool = False) -> d
             "trigger_price": round(s.period_low * 0.97, 2),
             "action": "跌破月内低点 -3% 视为趋势破坏, 暂停剩余未触发阶梯单",
         },
-        "timing_hint": timing_hint(s),
+        "timing_hint": timing_hint(s, trend=trend),
         "disclaimer": (
             "本方案为基于历史价格序列的算法化输出, 仅作技术演示, 不构成任何投资建议. "
             "加密资产波动剧烈, 请自行评估风险并控制仓位."
@@ -210,6 +275,12 @@ def render(plan: dict) -> str:
         f"近 1h {st['last_1h_return_pct']:+.2f}%, "
         f"近 ~12h {st['last_24p_return_pct']:+.2f}%"
     )
+    lines.append(
+        f"涨幅: 月内 {st['monthly_30d_pct']:+.2f}%, "
+        f"周 {st['weekly_pct']:+.2f}%, "
+        f"近 3 日 {st['last_3d_pct']:+.2f}%, "
+        f"距近期低 {st['from_recent_low_pct']:+.2f}%"
+    )
     lines.append("")
     if plan["core_position"] is not None:
         lines.append("--- 1. 核心仓 (立即建仓) ---")
@@ -229,18 +300,20 @@ def render(plan: dict) -> str:
     )
     lines.append(
         f"  {'档位':<8}{'跌幅':>7}{'限价':>14}{'金额(USD)':>13}"
-        f"{'BTC':>12}{'触达率':>10}{'近期可成交':>12}"
+        f"{'BTC':>12}{'类型':>11}{'成交率':>10}{'近 48 期':>10}"
     )
     for o in plan["ladder_buys"]:
         flag = "✓" if o["would_have_filled_recent"] else "✗"
+        otype = "限价买" if o["kind"] == "limit" else "突破买"
         lines.append(
             f"  {o['label']:<6}"
             f"  {o['trigger_drop_pct']:>+5.1f}%"
             f"  ${o['limit_price']:>11,.2f}"
             f"  ${o['alloc_usd']:>10,.2f}"
             f"  {o['alloc_btc']:>11.6f}"
+            f"  {otype:>9}"
             f"  {o['touch_rate_pct']:>7.1f}%"
-            f"   近 48 期 {flag}"
+            f"   {flag:>3}"
         )
     lines.append("")
     lines.append("--- 3. 风险控制 ---")
@@ -273,9 +346,13 @@ def main() -> None:
         "--no-core", action="store_true",
         help="核心仓已建立, 跳过核心仓, 100%% 预算分配给阶梯抄底"
     )
+    parser.add_argument(
+        "--trend", action="store_true",
+        help="单边上涨模式: 即时 + 浅回 + 突破追买 三档, 跳过深档"
+    )
     args = parser.parse_args()
 
-    plan = build_plan(args.budget, core_done=args.no_core)
+    plan = build_plan(args.budget, core_done=args.no_core, trend=args.trend)
     if args.json:
         print(json.dumps(plan, ensure_ascii=False, indent=2))
     else:
