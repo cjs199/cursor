@@ -10,8 +10,10 @@ data/btc_prices_monthly.json (中期日级) 两份 Google Finance
         - 处于近月低 25% 分位以下 -> 重仓核心 60% + 阶梯 40%
         - 处于近月中 25%-75% 分位  -> 平衡 40%/60%
         - 处于近月高 25% 分位以上 -> 轻核心 25% + 阶梯 75%
-  3. 阶梯抄底单按现价向下打 5 档 (-1%, -2%, -3.5%, -5%, -7%),
-     单档金额随跌幅增大递增 (1x / 1.25x / 1.5x / 2x / 2.5x).
+  3. 阶梯抄底单按现价向下打 3 档 (-1.5%, -4%, -7%),
+     单档金额随跌幅增大递增 (1x / 1.5x / 2.5x).
+     档位间距拉大: 浅档贴近现价以提高成交概率,
+     深档放在月内低位附近以备真正的深跌.
   4. 设置一个保护性止盈位 = 月内最高价的 102%, 触发后清掉
      最先建仓的 30% 头寸 (供参考).
   5. 用短期 30m 序列做最终时点提示: 若最近 1h 收益率 < -0.5%,
@@ -86,17 +88,21 @@ def allocation_split(pct_in_range: float) -> Tuple[float, float, str]:
     return 0.25, 0.75, "近月高位 (>75%)"
 
 
+LADDER_DROPS = [-1.5, -4.0, -7.0]
+LADDER_WEIGHTS = [1.0, 1.5, 2.5]
+LADDER_LABELS = ["浅档", "中档", "深档"]
+
+
 def ladder_orders(current: float, ladder_budget: float) -> List[dict]:
-    drops = [-1.0, -2.0, -3.5, -5.0, -7.0]
-    weights = [1.0, 1.25, 1.5, 2.0, 2.5]
-    total_w = sum(weights)
+    total_w = sum(LADDER_WEIGHTS)
     orders = []
-    for d, w in zip(drops, weights):
+    for d, w, label in zip(LADDER_DROPS, LADDER_WEIGHTS, LADDER_LABELS):
         price = current * (1.0 + d / 100.0)
         amount = ladder_budget * (w / total_w)
         qty = amount / price
         orders.append(
             {
+                "label": label,
                 "trigger_drop_pct": d,
                 "limit_price": round(price, 2),
                 "alloc_usd": round(amount, 2),
@@ -194,10 +200,11 @@ def render(plan: dict) -> str:
     lines.append(
         f"--- 2. 阶梯抄底单 (合计 ${plan['ladder_total_usd']:,.2f}) ---"
     )
-    lines.append(f"  {'档位':<8}{'限价':>14}{'金额(USD)':>14}{'数量(BTC)':>14}")
+    lines.append(f"  {'档位':<10}{'跌幅':>8}{'限价':>14}{'金额(USD)':>14}{'数量(BTC)':>14}")
     for o in plan["ladder_buys"]:
         lines.append(
-            f"  {o['trigger_drop_pct']:>+5.1f}%  "
+            f"  {o['label']:<8}"
+            f"  {o['trigger_drop_pct']:>+5.1f}%"
             f"  ${o['limit_price']:>11,.2f}"
             f"  ${o['alloc_usd']:>11,.2f}"
             f"  {o['alloc_btc']:>13.6f}"
