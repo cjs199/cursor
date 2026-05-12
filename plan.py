@@ -132,17 +132,36 @@ def take_profit(monthly_high: float) -> dict:
     }
 
 
-def build_plan(budget: float = DEFAULT_BUDGET_USD) -> dict:
+def fill_probability(short: List[float], price: float) -> dict:
+    """统计最近 short 序列中, 有多少比例的样本 <= 给定限价 (即可成交)."""
+    n = len(short)
+    touched = sum(1 for p in short if p <= price)
+    recent_low = min(short[-48:]) if n >= 48 else min(short)
+    return {
+        "touch_rate_pct": round(touched / n * 100.0, 1) if n else 0.0,
+        "recent_low": round(recent_low, 2),
+        "would_have_filled_recent": price >= recent_low,
+    }
+
+
+def build_plan(budget: float = DEFAULT_BUDGET_USD, core_done: bool = False) -> dict:
     short, monthly = load_series()
     s = compute_stats(short, monthly)
     core_pct, ladder_pct, regime = allocation_split(s.pct_in_range)
 
+    if core_done:
+        core_pct, ladder_pct = 0.0, 1.0
     core_budget = budget * core_pct
     ladder_budget = budget * ladder_pct
+
+    ladders = ladder_orders(s.current, ladder_budget)
+    for o in ladders:
+        o.update(fill_probability(short, o["limit_price"]))
 
     plan = {
         "budget_usd": budget,
         "regime": regime,
+        "core_already_built": core_done,
         "stats": {
             "current_price": round(s.current, 2),
             "monthly_low": round(s.period_low, 2),
@@ -152,13 +171,15 @@ def build_plan(budget: float = DEFAULT_BUDGET_USD) -> dict:
             "last_1h_return_pct": round(s.last_1h_return_pct, 2),
             "last_24p_return_pct": round(s.last_24p_return_pct, 2),
         },
-        "core_position": {
-            "alloc_usd": round(core_budget, 2),
-            "execution": "市价/接近市价限价立即建仓 (一次性吃满核心仓)",
-            "limit_price": round(s.current * 1.001, 2),
-            "alloc_btc": round(core_budget / s.current, 6),
-        },
-        "ladder_buys": ladder_orders(s.current, ladder_budget),
+        "core_position": (
+            None if core_done else {
+                "alloc_usd": round(core_budget, 2),
+                "execution": "市价/接近市价限价立即建仓 (一次性吃满核心仓)",
+                "limit_price": round(s.current * 1.001, 2),
+                "alloc_btc": round(core_budget / s.current, 6),
+            }
+        ),
+        "ladder_buys": ladders,
         "ladder_total_usd": round(ladder_budget, 2),
         "take_profit": take_profit(s.period_high),
         "stop_loss": {
@@ -190,24 +211,36 @@ def render(plan: dict) -> str:
         f"近 ~12h {st['last_24p_return_pct']:+.2f}%"
     )
     lines.append("")
-    lines.append("--- 1. 核心仓 (立即建仓) ---")
-    c = plan["core_position"]
-    lines.append(
-        f"  挂限价 ${c['limit_price']:,.2f}  投入 ${c['alloc_usd']:,.2f}  "
-        f"≈ {c['alloc_btc']} BTC"
-    )
-    lines.append("")
-    lines.append(
-        f"--- 2. 阶梯抄底单 (合计 ${plan['ladder_total_usd']:,.2f}) ---"
-    )
-    lines.append(f"  {'档位':<10}{'跌幅':>8}{'限价':>14}{'金额(USD)':>14}{'数量(BTC)':>14}")
-    for o in plan["ladder_buys"]:
+    if plan["core_position"] is not None:
+        lines.append("--- 1. 核心仓 (立即建仓) ---")
+        c = plan["core_position"]
         lines.append(
-            f"  {o['label']:<8}"
+            f"  挂限价 ${c['limit_price']:,.2f}  投入 ${c['alloc_usd']:,.2f}  "
+            f"≈ {c['alloc_btc']} BTC"
+        )
+        lines.append("")
+        section = "2"
+    else:
+        lines.append("--- 核心仓: 用户已建仓, 跳过. 全部预算 → 阶梯抄底 ---")
+        lines.append("")
+        section = "1"
+    lines.append(
+        f"--- {section}. 阶梯抄底单 (合计 ${plan['ladder_total_usd']:,.2f}) ---"
+    )
+    lines.append(
+        f"  {'档位':<8}{'跌幅':>7}{'限价':>14}{'金额(USD)':>13}"
+        f"{'BTC':>12}{'触达率':>10}{'近期可成交':>12}"
+    )
+    for o in plan["ladder_buys"]:
+        flag = "✓" if o["would_have_filled_recent"] else "✗"
+        lines.append(
+            f"  {o['label']:<6}"
             f"  {o['trigger_drop_pct']:>+5.1f}%"
             f"  ${o['limit_price']:>11,.2f}"
-            f"  ${o['alloc_usd']:>11,.2f}"
-            f"  {o['alloc_btc']:>13.6f}"
+            f"  ${o['alloc_usd']:>10,.2f}"
+            f"  {o['alloc_btc']:>11.6f}"
+            f"  {o['touch_rate_pct']:>7.1f}%"
+            f"   近 48 期 {flag}"
         )
     lines.append("")
     lines.append("--- 3. 风险控制 ---")
@@ -236,9 +269,13 @@ def main() -> None:
         "--json", action="store_true",
         help="输出原始 JSON 而非渲染文本"
     )
+    parser.add_argument(
+        "--no-core", action="store_true",
+        help="核心仓已建立, 跳过核心仓, 100%% 预算分配给阶梯抄底"
+    )
     args = parser.parse_args()
 
-    plan = build_plan(args.budget)
+    plan = build_plan(args.budget, core_done=args.no_core)
     if args.json:
         print(json.dumps(plan, ensure_ascii=False, indent=2))
     else:

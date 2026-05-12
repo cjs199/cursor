@@ -16,8 +16,12 @@
 ```bash
 python3 plan.py                      # 默认预算 10,000 USD, 文本输出
 python3 plan.py --budget 5000        # 自定义预算
+python3 plan.py --no-core            # 核心仓已建仓: 跳过核心仓, 100% 预算走阶梯
 python3 plan.py --json               # 输出原始 JSON, 便于后续脚本接管
 ```
+
+输出会附带每个限价的**触达率统计** (历史样本中价格曾下穿该限价的比例)
+和**近 48 期可成交标志**, 直观告知挂单成交概率.
 
 ## 策略概述
 
